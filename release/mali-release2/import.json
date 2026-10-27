@@ -1,0 +1,8 @@
+{
+    "id":  "mali-release2",
+    "version":  "1.9.2",
+    "dxgiSha256":  "3d47e60d75ee38bb84f8deaa9a9ffbf9ae639a630d4aa2bef94e014b9ed1c186",
+    "d3d11Sha256":  "90a8f98326923b9facf449183392d539f575ee44b9aac58a396689d1e99c4448",
+    "zipName":  "dxvk-1.9.2-mali-release2.zip",
+    "bundled":  false
+}

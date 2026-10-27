@@ -1,0 +1,5 @@
+# local build output
+/out/
+*.o
+*.a
+android-arm64.ini

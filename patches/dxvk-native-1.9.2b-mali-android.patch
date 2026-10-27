@@ -1,0 +1,1529 @@
+﻿diff --git a/include/native/wsi/native_sdl3.h b/include/native/wsi/native_sdl3.h
+new file mode 100644
+index 0000000..b865efc
+--- /dev/null
++++ b/include/native/wsi/native_sdl3.h
+@@ -0,0 +1,26 @@
++#include <cstdint>
++#include <windows.h>
++
++#include <SDL3/SDL.h>
++
++namespace dxvk::wsi {
++
++  inline SDL_Window* fromHwnd(HWND hWindow) {
++    return reinterpret_cast<SDL_Window*>(hWindow);
++  }
++
++  inline HWND toHwnd(SDL_Window* pWindow) {
++    return reinterpret_cast<HWND>(pWindow);
++  }
++
++  // Offset so null HMONITORs go to -1
++  inline int32_t fromHmonitor(HMONITOR hMonitor) {
++    return static_cast<int32_t>(reinterpret_cast<intptr_t>(hMonitor)) - 1;
++  }
++
++  // Offset so -1 display index goes to 0 == NULL
++  inline HMONITOR toHmonitor(int32_t displayIndex) {
++    return reinterpret_cast<HMONITOR>(static_cast<intptr_t>(displayIndex + 1));
++  }
++
++}
+diff --git a/include/native/wsi/native_wsi.h b/include/native/wsi/native_wsi.h
+index 00a2990..841d683 100644
+--- a/include/native/wsi/native_wsi.h
++++ b/include/native/wsi/native_wsi.h
+@@ -4,6 +4,8 @@
+ #error You shouldnt be using this code path.
+ #elif DXVK_WSI_SDL2
+ #include "wsi/native_sdl2.h"
++#elif DXVK_WSI_SDL3
++#include "wsi/native_sdl3.h"
+ #else
+ #error Unknown wsi!
+ #endif
+\ No newline at end of file
+diff --git a/meson.build b/meson.build
+index 0b9a118..83fe6c0 100644
+--- a/meson.build
++++ b/meson.build
+@@ -120,9 +120,20 @@ if not dxvk_native
+ else
+   add_project_arguments('-DDXVK_NATIVE', language : 'cpp')
+ 
++  # Like the Windows DLLs, d3d11 and dxgi each carry a private copy of the DXVK code
++  # and only export their API entry points (marked DLLEXPORT). Without this, C++
++  # exceptions thrown in one library are not caught in the other because every
++  # library resolves its own DxvkError type_info.
++  add_project_arguments('-fvisibility=hidden', '-fvisibility-inlines-hidden', language : 'cpp')
++
+   dxvk_wsi      = get_option('dxvk_native_wsi')
+   dxvk_platform = target_machine.system()
+ 
++  # Android's bionic libc is close enough to Linux for every platform file.
++  if dxvk_platform == 'android'
++    dxvk_platform = 'linux'
++  endif
++
+   if cpu_family == 'x86'
+     if dxvk_compiler.has_argument('-msse') and dxvk_compiler.has_argument('-msse2')
+       add_project_arguments('-msse', '-msse2', language: 'c')
+@@ -141,7 +152,12 @@ else
+   else
+     dxvk_include_path = include_directories('./include', './include/native/', './include/native/windows', './include/native/directx')
+     lib_vulkan  = dxvk_compiler.find_library('vulkan')
+-    lib_sdl2    = dxvk_compiler.find_library('SDL2')
++    if dxvk_wsi == 'sdl3'
++      lib_sdl3  = dxvk_compiler.find_library('SDL3', dirs : get_option('sdl3_libdir'))
++      lib_sdl2  = []
++    else
++      lib_sdl2  = dxvk_compiler.find_library('SDL2')
++    endif
+     wrc = find_program('echo')
+     so_prefix = 'libdxvk_'
+   endif
+diff --git a/meson_options.txt b/meson_options.txt
+index 338dd8d..1696f4d 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -7,3 +7,5 @@ option('build_id',     type : 'boolean', value : false)
+ 
+ option('dxvk_native_force', type : 'boolean', value : false,  description: 'Force building using DXVK native. Eg. for Windows')
+ option('dxvk_native_wsi',   type : 'string',  value : 'sdl2', description: 'WSI system to use if building natively.')
++
++option('sdl3_libdir', type : 'array', value : [], description: 'Directories searched for libSDL3 when dxvk_native_wsi is sdl3')
+diff --git a/src/d3d11/d3d11_device.cpp b/src/d3d11/d3d11_device.cpp
+index 90a26b0..a02df2f 100644
+--- a/src/d3d11/d3d11_device.cpp
++++ b/src/d3d11/d3d11_device.cpp
+@@ -1948,13 +1948,15 @@ namespace dxvk {
+     if (featureLevel >= D3D_FEATURE_LEVEL_9_1) {
+       enabled.core.features.depthClamp                            = VK_TRUE;
+       enabled.core.features.depthBiasClamp                        = VK_TRUE;
+-      enabled.core.features.fillModeNonSolid                      = VK_TRUE;
++      enabled.core.features.fillModeNonSolid                      = supported.core.features.fillModeNonSolid;
+       enabled.core.features.pipelineStatisticsQuery               = supported.core.features.pipelineStatisticsQuery;
+       enabled.core.features.sampleRateShading                     = VK_TRUE;
+       enabled.core.features.samplerAnisotropy                     = supported.core.features.samplerAnisotropy;
+-      enabled.core.features.shaderClipDistance                    = VK_TRUE;
+-      enabled.core.features.shaderCullDistance                    = VK_TRUE;
+-      enabled.core.features.textureCompressionBC                  = VK_TRUE;
++      // Mali: these are optional here, see the fallbacks in DxbcCompiler,
++      // D3D11RasterizerState and the BC texture emulation.
++      enabled.core.features.shaderClipDistance                    = supported.core.features.shaderClipDistance;
++      enabled.core.features.shaderCullDistance                    = supported.core.features.shaderCullDistance;
++      enabled.core.features.textureCompressionBC                  = supported.core.features.textureCompressionBC;
+       enabled.extDepthClipEnable.depthClipEnable                  = supported.extDepthClipEnable.depthClipEnable;
+       enabled.extHostQueryReset.hostQueryReset                    = supported.extHostQueryReset.hostQueryReset;
+     }
+@@ -1965,7 +1967,7 @@ namespace dxvk {
+     
+     if (featureLevel >= D3D_FEATURE_LEVEL_9_3) {
+       enabled.core.features.independentBlend                      = VK_TRUE;
+-      enabled.core.features.multiViewport                         = VK_TRUE;
++      enabled.core.features.multiViewport                         = supported.core.features.multiViewport;
+     }
+     
+     if (featureLevel >= D3D_FEATURE_LEVEL_10_0) {
+@@ -1973,8 +1975,8 @@ namespace dxvk {
+       enabled.core.features.logicOp                               = supported.core.features.logicOp;
+       enabled.core.features.shaderImageGatherExtended             = VK_TRUE;
+       enabled.core.features.variableMultisampleRate               = supported.core.features.variableMultisampleRate;
+-      enabled.extTransformFeedback.transformFeedback              = VK_TRUE;
+-      enabled.extTransformFeedback.geometryStreams                = VK_TRUE;
++      enabled.extTransformFeedback.transformFeedback              = supported.extTransformFeedback.transformFeedback;
++      enabled.extTransformFeedback.geometryStreams                = supported.extTransformFeedback.geometryStreams;
+     }
+     
+     if (featureLevel >= D3D_FEATURE_LEVEL_10_1) {
+diff --git a/src/d3d11/d3d11_rasterizer.cpp b/src/d3d11/d3d11_rasterizer.cpp
+index 6d70847..4505ece 100644
+--- a/src/d3d11/d3d11_rasterizer.cpp
++++ b/src/d3d11/d3d11_rasterizer.cpp
+@@ -13,7 +13,11 @@ namespace dxvk {
+     switch (desc.FillMode) {
+       default:
+       case D3D11_FILL_SOLID:     m_state.polygonMode = VK_POLYGON_MODE_FILL; break;
+-      case D3D11_FILL_WIREFRAME: m_state.polygonMode = VK_POLYGON_MODE_LINE; break;
++      case D3D11_FILL_WIREFRAME:
++        m_state.polygonMode = device->GetDXVKDevice()->features().core.features.fillModeNonSolid
++          ? VK_POLYGON_MODE_LINE
++          : VK_POLYGON_MODE_FILL;
++        break;
+     }
+     
+     // Face culling properties. The rasterizer may discard
+diff --git a/src/d3d11/d3d11_swapchain.cpp b/src/d3d11/d3d11_swapchain.cpp
+index d748359..14e7a95 100644
+--- a/src/d3d11/d3d11_swapchain.cpp
++++ b/src/d3d11/d3d11_swapchain.cpp
+@@ -346,10 +346,13 @@ namespace dxvk {
+ 
+ 
+   void D3D11SwapChain::SynchronizePresent() {
+-    // Recreate swap chain if the previous present call failed
++    // Recreate swap chain if the previous present call failed. VK_SUBOPTIMAL_KHR is not a
++    // failure: Android returns it from every present when the display is rotated relative to
++    // the swap chain (the compositor rotates for us), and recreating the swap chain on each
++    // frame costs several milliseconds of CPU time and a full GPU wait.
+     VkResult status = m_device->waitForSubmission(&m_presentStatus);
+     
+-    if (status != VK_SUCCESS)
++    if (status != VK_SUCCESS && status != VK_SUBOPTIMAL_KHR)
+       RecreateSwapChain(m_vsync);
+   }
+ 
+diff --git a/src/d3d11/d3d11_texture.cpp b/src/d3d11/d3d11_texture.cpp
+index 35c6afd..c25d837 100644
+--- a/src/d3d11/d3d11_texture.cpp
++++ b/src/d3d11/d3d11_texture.cpp
+@@ -1,6 +1,7 @@
+ #include "d3d11_device.h"
+ #include "d3d11_gdi.h"
+ #include "d3d11_texture.h"
++#include "../dxvk/dxvk_bc_format.h"
+ 
+ namespace dxvk {
+   
+@@ -37,6 +38,11 @@ namespace dxvk {
+     imageInfo.initialLayout   = VK_IMAGE_LAYOUT_UNDEFINED;
+     imageInfo.shared          = vkImage != VK_NULL_HANDLE;
+ 
++    // BC data is decoded on upload if the device cannot sample BC textures
++    if (formatPacked.Format != formatInfo.Format
++     && bc::emulatedFormat(formatPacked.Format) == formatInfo.Format)
++      imageInfo.bcEmulation = formatPacked.Format;
++
+     if (!pDevice->GetOptions()->disableMsaa)
+       DecodeSampleCount(m_desc.SampleDesc.Count, &imageInfo.sampleCount);
+ 
+@@ -146,7 +152,7 @@ namespace dxvk {
+     
+     // Determine map mode based on our findings
+     m_mapMode = DetermineMapMode(&imageInfo);
+-    
++
+     // If the image is mapped directly to host memory, we need
+     // to enable linear tiling, and DXVK needs to be aware that
+     // the image can be accessed by the host.
+diff --git a/src/dxbc/dxbc_compiler.cpp b/src/dxbc/dxbc_compiler.cpp
+index f4f3951..ef2468a 100644
+--- a/src/dxbc/dxbc_compiler.cpp
++++ b/src/dxbc/dxbc_compiler.cpp
+@@ -4424,6 +4424,18 @@ namespace dxvk {
+     DxbcRegisterValue result;
+     result.type.ctype = scalar.type.ctype;
+     result.type.ccount = count;
++
++    // Bool vectors are used as select conditions for 'resource not bound' fallbacks, and their
++    // components are specialization constants. Mali drivers evaluate a constant composite of
++    // spec constants wrongly (the select always takes the 'unbound' branch, so every texture
++    // sample returns zero). Building the vector inside the function avoids that.
++    if (scalar.type.ctype == DxbcScalarType::Bool) {
++      result.id = m_module.opCompositeConstruct(
++        getVectorTypeId(result.type),
++        count, scalarIds.data());
++      return result;
++    }
++
+     result.id = m_module.constComposite(
+       getVectorTypeId(result.type),
+       count, scalarIds.data());
+@@ -6652,8 +6664,10 @@ namespace dxvk {
+   
+   
+   void DxbcCompiler::emitVsInit() {
+-    m_module.enableCapability(spv::CapabilityClipDistance);
+-    m_module.enableCapability(spv::CapabilityCullDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityCullDistance);
+     m_module.enableCapability(spv::CapabilityDrawParameters);
+     
+     // Declare the per-vertex output block. This is where
+@@ -6696,8 +6710,10 @@ namespace dxvk {
+   
+   void DxbcCompiler::emitHsInit() {
+     m_module.enableCapability(spv::CapabilityTessellation);
+-    m_module.enableCapability(spv::CapabilityClipDistance);
+-    m_module.enableCapability(spv::CapabilityCullDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityCullDistance);
+     
+     m_hs.builtinInvocationId = emitNewBuiltinVariable(
+       DxbcRegisterInfo {
+@@ -6713,8 +6729,10 @@ namespace dxvk {
+   
+   void DxbcCompiler::emitDsInit() {
+     m_module.enableCapability(spv::CapabilityTessellation);
+-    m_module.enableCapability(spv::CapabilityClipDistance);
+-    m_module.enableCapability(spv::CapabilityCullDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityCullDistance);
+     
+     m_ds.builtinTessLevelOuter = emitBuiltinTessLevelOuter(spv::StorageClassInput);
+     m_ds.builtinTessLevelInner = emitBuiltinTessLevelInner(spv::StorageClassInput);
+@@ -6755,8 +6773,10 @@ namespace dxvk {
+   
+   void DxbcCompiler::emitGsInit() {
+     m_module.enableCapability(spv::CapabilityGeometry);
+-    m_module.enableCapability(spv::CapabilityClipDistance);
+-    m_module.enableCapability(spv::CapabilityCullDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityClipDistance);
++    if (m_moduleInfo.options.useClipCullDistance)
++      m_module.enableCapability(spv::CapabilityCullDistance);
+ 
+     // Enable capabilities for xfb mode if necessary
+     if (m_moduleInfo.xfb != nullptr) {
+@@ -7160,7 +7180,7 @@ namespace dxvk {
+           uint32_t          length,
+           spv::BuiltIn      builtIn,
+           spv::StorageClass storageClass) {
+-    if (length == 0)
++    if (length == 0 || !m_moduleInfo.options.useClipCullDistance)
+       return 0;
+     
+     uint32_t t_f32 = m_module.defFloatType(32);
+diff --git a/src/dxbc/dxbc_options.cpp b/src/dxbc/dxbc_options.cpp
+index fc89f74..49da8b3 100644
+--- a/src/dxbc/dxbc_options.cpp
++++ b/src/dxbc/dxbc_options.cpp
+@@ -17,6 +17,9 @@ namespace dxvk {
+ 
+     useDepthClipWorkaround
+       = !devFeatures.extDepthClipEnable.depthClipEnable;
++    useClipCullDistance
++      = devFeatures.core.features.shaderClipDistance
++     && devFeatures.core.features.shaderCullDistance;
+     useStorageImageReadWithoutFormat
+       = devFeatures.core.features.shaderStorageImageReadWithoutFormat;
+     useSubgroupOpsForAtomicCounters
+diff --git a/src/dxbc/dxbc_options.h b/src/dxbc/dxbc_options.h
+index d21f3b1..66c93fe 100644
+--- a/src/dxbc/dxbc_options.h
++++ b/src/dxbc/dxbc_options.h
+@@ -23,6 +23,10 @@ namespace dxvk {
+     // clip device feature is not supported
+     bool useDepthClipWorkaround = false;
+ 
++    /// Declare ClipDistance/CullDistance built-ins. When the device does not
++    /// support them (Mali) the arrays are dropped and user clip planes are lost.
++    bool useClipCullDistance = true;
++
+     /// Use the ShaderImageReadWithoutFormat capability.
+     bool useStorageImageReadWithoutFormat = false;
+ 
+diff --git a/src/dxgi/dxgi_format.cpp b/src/dxgi/dxgi_format.cpp
+index f628e5d..c117321 100644
+--- a/src/dxgi/dxgi_format.cpp
++++ b/src/dxgi/dxgi_format.cpp
+@@ -860,6 +860,32 @@ namespace dxvk {
+       RemapDepthFormat(DXGI_FORMAT_D24_UNORM_S8_UINT,     VK_FORMAT_D32_SFLOAT_S8_UINT);
+     }
+ 
++    // GPUs without textureCompressionBC (Mali): BC1-BC5 are decoded on the CPU
++    // when uploaded, so images use an uncompressed format instead. The packed
++    // mapping (g_dxgiFormats) stays untouched so data pitches keep describing
++    // the original BC layout.
++    if (!adapter->features().core.features.textureCompressionBC) {
++      Logger::info("DXGI: textureCompressionBC not supported, emulating BC1-BC5 with CPU decoding");
++
++      for (auto& mapping : m_dxgiFormats) {
++        VkFormat replacement = bc::emulatedFormat(mapping.FormatColor);
++
++        if (replacement != VK_FORMAT_UNDEFINED)
++          mapping.FormatColor = replacement;
++      }
++
++      for (auto& family : m_dxgiFamilies) {
++        DXGI_VK_FORMAT_FAMILY adjusted;
++
++        for (uint32_t i = 0; i < family.FormatCount; i++) {
++          VkFormat replacement = bc::emulatedFormat(family.Formats[i]);
++          adjusted.Add(replacement != VK_FORMAT_UNDEFINED ? replacement : family.Formats[i]);
++        }
++
++        family = adjusted;
++      }
++    }
++
+     if (!adapter->features().ext4444Formats.formatA4R4G4B4) {
+       RemapColorFormat(DXGI_FORMAT_B4G4R4A4_UNORM, VK_FORMAT_B4G4R4A4_UNORM_PACK16,
+         { VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_R,
+diff --git a/src/dxgi/dxgi_format.h b/src/dxgi/dxgi_format.h
+index 59e6493..fc8f898 100644
+--- a/src/dxgi/dxgi_format.h
++++ b/src/dxgi/dxgi_format.h
+@@ -3,6 +3,7 @@
+ #include "dxgi_include.h"
+ 
+ #include "../dxvk/dxvk_adapter.h"
++#include "../dxvk/dxvk_bc_format.h"
+ #include "../dxvk/dxvk_format.h"
+ 
+ namespace dxvk {
+diff --git a/src/dxgi/dxgi_output.cpp b/src/dxgi/dxgi_output.cpp
+index 3697892..d08a7a1 100644
+--- a/src/dxgi/dxgi_output.cpp
++++ b/src/dxgi/dxgi_output.cpp
+@@ -425,11 +425,30 @@ namespace dxvk {
+     if (FAILED(hr))
+       return hr;
+     
+-    monitorInfo->GammaCurve = *pArray;
++    DXGI_GAMMA_CONTROL gamma = *pArray;
++
++    // T6 Requiem on Android hands over ramps whose last control point (index 1024) was never
++    // written: it is 0 or uninitialized memory while the rest of the curve rises towards 1.
++    // That maps every bright pixel to black. A gamma ramp must not decrease, so rebuild the
++    // last point by extending the curve instead.
++    {
++      constexpr uint32_t last = DXGI_VK_GAMMA_CP_COUNT - 1;
++
++      auto repair = [] (float& end, float prev, float prev2) {
++        if (!(end >= prev) || end > 1.0f)
++          end = std::min(1.0f, std::max(prev, prev + (prev - prev2)));
++      };
++
++      repair(gamma.GammaCurve[last].Red,   gamma.GammaCurve[last - 1].Red,   gamma.GammaCurve[last - 2].Red);
++      repair(gamma.GammaCurve[last].Green, gamma.GammaCurve[last - 1].Green, gamma.GammaCurve[last - 2].Green);
++      repair(gamma.GammaCurve[last].Blue,  gamma.GammaCurve[last - 1].Blue,  gamma.GammaCurve[last - 2].Blue);
++    }
++
++    monitorInfo->GammaCurve = gamma;
+ 
+     if (monitorInfo->pSwapChain) {
+       hr = monitorInfo->pSwapChain->SetGammaControl(
+-        DXGI_VK_GAMMA_CP_COUNT, pArray->GammaCurve);
++        DXGI_VK_GAMMA_CP_COUNT, gamma.GammaCurve);
+     }
+ 
+     m_monitorInfo->ReleaseMonitorData();
+diff --git a/src/dxvk/dxvk_bc_decode.cpp b/src/dxvk/dxvk_bc_decode.cpp
+new file mode 100644
+index 0000000..29e90e1
+--- /dev/null
++++ b/src/dxvk/dxvk_bc_decode.cpp
+@@ -0,0 +1,230 @@
++#include <algorithm>
++#include <cstring>
++
++#include "dxvk_bc_format.h"
++
++namespace dxvk::bc {
++
++  namespace {
++
++    struct Rgba8 {
++      uint8_t r, g, b, a;
++    };
++
++    inline uint8_t expand5(uint32_t v) { return uint8_t((v << 3) | (v >> 2)); }
++    inline uint8_t expand6(uint32_t v) { return uint8_t((v << 2) | (v >> 4)); }
++
++
++    // Decodes the 8 byte color block shared by BC1, BC2 and BC3. Only BC1
++    // may use the 3-color + transparent mode, BC2/BC3 always use 4 colors.
++    void decodeColorBlock(const uint8_t* b, Rgba8* out, bool allowTransparent) {
++      const uint32_t c0 = uint32_t(b[0]) | (uint32_t(b[1]) << 8);
++      const uint32_t c1 = uint32_t(b[2]) | (uint32_t(b[3]) << 8);
++
++      Rgba8 p[4];
++      p[0] = { expand5(c0 >> 11), expand6((c0 >> 5) & 0x3f), expand5(c0 & 0x1f), 255 };
++      p[1] = { expand5(c1 >> 11), expand6((c1 >> 5) & 0x3f), expand5(c1 & 0x1f), 255 };
++
++      if (c0 > c1 || !allowTransparent) {
++        p[2] = { uint8_t((2 * p[0].r + p[1].r) / 3), uint8_t((2 * p[0].g + p[1].g) / 3), uint8_t((2 * p[0].b + p[1].b) / 3), 255 };
++        p[3] = { uint8_t((p[0].r + 2 * p[1].r) / 3), uint8_t((p[0].g + 2 * p[1].g) / 3), uint8_t((p[0].b + 2 * p[1].b) / 3), 255 };
++      } else {
++        p[2] = { uint8_t((p[0].r + p[1].r) / 2), uint8_t((p[0].g + p[1].g) / 2), uint8_t((p[0].b + p[1].b) / 2), 255 };
++        p[3] = { 0, 0, 0, 0 };
++      }
++
++      const uint32_t indices = uint32_t(b[4]) | (uint32_t(b[5]) << 8)
++                             | (uint32_t(b[6]) << 16) | (uint32_t(b[7]) << 24);
++
++      for (uint32_t i = 0; i < 16; i++)
++        out[i] = p[(indices >> (2 * i)) & 3];
++    }
++
++
++    // Decodes the 8 byte interpolated block used for BC3 alpha, BC4 and BC5.
++    void decodeUnormChannelBlock(const uint8_t* b, uint8_t* out) {
++      uint32_t t[8];
++      t[0] = b[0];
++      t[1] = b[1];
++
++      if (t[0] > t[1]) {
++        for (uint32_t i = 1; i < 7; i++)
++          t[1 + i] = ((7 - i) * t[0] + i * t[1]) / 7;
++      } else {
++        for (uint32_t i = 1; i < 5; i++)
++          t[1 + i] = ((5 - i) * t[0] + i * t[1]) / 5;
++        t[6] = 0;
++        t[7] = 255;
++      }
++
++      uint64_t bits = 0;
++      for (uint32_t i = 0; i < 6; i++)
++        bits |= uint64_t(b[2 + i]) << (8 * i);
++
++      for (uint32_t i = 0; i < 16; i++)
++        out[i] = uint8_t(t[(bits >> (3 * i)) & 7]);
++    }
++
++
++    // Same as above for the signed BC4/BC5 variants. Output bytes hold
++    // two's complement values in the -127..127 range.
++    void decodeSnormChannelBlock(const uint8_t* b, uint8_t* out) {
++      int32_t t[8];
++      t[0] = std::max<int32_t>(int8_t(b[0]), -127);
++      t[1] = std::max<int32_t>(int8_t(b[1]), -127);
++
++      if (t[0] > t[1]) {
++        for (int32_t i = 1; i < 7; i++)
++          t[1 + i] = ((7 - i) * t[0] + i * t[1]) / 7;
++      } else {
++        for (int32_t i = 1; i < 5; i++)
++          t[1 + i] = ((5 - i) * t[0] + i * t[1]) / 5;
++        t[6] = -127;
++        t[7] = 127;
++      }
++
++      uint64_t bits = 0;
++      for (uint32_t i = 0; i < 6; i++)
++        bits |= uint64_t(b[2 + i]) << (8 * i);
++
++      for (uint32_t i = 0; i < 16; i++)
++        out[i] = uint8_t(int8_t(t[(bits >> (3 * i)) & 7]));
++    }
++
++
++    struct BlockLayout {
++      uint32_t blockBytes;
++      uint32_t texelBytes;
++    };
++
++
++    BlockLayout getLayout(VkFormat format) {
++      switch (format) {
++        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: return { 8, 4 };
++        case VK_FORMAT_BC2_UNORM_BLOCK:
++        case VK_FORMAT_BC2_SRGB_BLOCK:
++        case VK_FORMAT_BC3_UNORM_BLOCK:
++        case VK_FORMAT_BC3_SRGB_BLOCK:      return { 16, 4 };
++        case VK_FORMAT_BC4_UNORM_BLOCK:
++        case VK_FORMAT_BC4_SNORM_BLOCK:     return { 8, 1 };
++        case VK_FORMAT_BC5_UNORM_BLOCK:
++        case VK_FORMAT_BC5_SNORM_BLOCK:     return { 16, 2 };
++        default:                            return { 0, 0 };
++      }
++    }
++
++
++    // Decodes one block into 16 texels of texelBytes each, row-major.
++    void decodeBlock(VkFormat format, const uint8_t* b, uint8_t* texels) {
++      switch (format) {
++        case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++        case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: {
++          decodeColorBlock(b, reinterpret_cast<Rgba8*>(texels), true);
++        } break;
++
++        case VK_FORMAT_BC2_UNORM_BLOCK:
++        case VK_FORMAT_BC2_SRGB_BLOCK: {
++          auto rgba = reinterpret_cast<Rgba8*>(texels);
++          decodeColorBlock(b + 8, rgba, false);
++
++          for (uint32_t i = 0; i < 16; i++) {
++            uint32_t nibble = (b[i >> 1] >> ((i & 1) * 4)) & 0xf;
++            rgba[i].a = uint8_t(nibble * 17);
++          }
++        } break;
++
++        case VK_FORMAT_BC3_UNORM_BLOCK:
++        case VK_FORMAT_BC3_SRGB_BLOCK: {
++          auto rgba = reinterpret_cast<Rgba8*>(texels);
++          decodeColorBlock(b + 8, rgba, false);
++
++          uint8_t alpha[16];
++          decodeUnormChannelBlock(b, alpha);
++
++          for (uint32_t i = 0; i < 16; i++)
++            rgba[i].a = alpha[i];
++        } break;
++
++        case VK_FORMAT_BC4_UNORM_BLOCK:
++          decodeUnormChannelBlock(b, texels);
++          break;
++
++        case VK_FORMAT_BC4_SNORM_BLOCK:
++          decodeSnormChannelBlock(b, texels);
++          break;
++
++        case VK_FORMAT_BC5_UNORM_BLOCK:
++        case VK_FORMAT_BC5_SNORM_BLOCK: {
++          uint8_t r[16], g[16];
++
++          if (format == VK_FORMAT_BC5_UNORM_BLOCK) {
++            decodeUnormChannelBlock(b,     r);
++            decodeUnormChannelBlock(b + 8, g);
++          } else {
++            decodeSnormChannelBlock(b,     r);
++            decodeSnormChannelBlock(b + 8, g);
++          }
++
++          for (uint32_t i = 0; i < 16; i++) {
++            texels[2 * i + 0] = r[i];
++            texels[2 * i + 1] = g[i];
++          }
++        } break;
++
++        default:
++          break;
++      }
++    }
++
++  }
++
++
++  void decode(
++          VkFormat      format,
++    const void*         src,
++          VkDeviceSize  srcRowPitch,
++          VkDeviceSize  srcDepthPitch,
++          void*         dst,
++          uint32_t      width,
++          uint32_t      height,
++          uint32_t      depth) {
++    const BlockLayout layout = getLayout(format);
++
++    if (!layout.blockBytes || !width || !height || !depth)
++      return;
++
++    const uint32_t blocksX = (width  + 3) / 4;
++    const uint32_t blocksY = (height + 3) / 4;
++
++    const VkDeviceSize dstRowPitch   = VkDeviceSize(width) * layout.texelBytes;
++    const VkDeviceSize dstDepthPitch = VkDeviceSize(height) * dstRowPitch;
++
++    auto srcBytes = reinterpret_cast<const uint8_t*>(src);
++    auto dstBytes = reinterpret_cast<uint8_t*>(dst);
++
++    uint8_t texels[16 * 4];
++
++    for (uint32_t z = 0; z < depth; z++) {
++      for (uint32_t by = 0; by < blocksY; by++) {
++        const uint8_t* srcRow = srcBytes + z * srcDepthPitch + by * srcRowPitch;
++
++        const uint32_t rows = std::min(4u, height - by * 4);
++
++        for (uint32_t bx = 0; bx < blocksX; bx++) {
++          decodeBlock(format, srcRow + bx * layout.blockBytes, texels);
++
++          const uint32_t cols = std::min(4u, width - bx * 4);
++
++          for (uint32_t y = 0; y < rows; y++) {
++            uint8_t* dstTexel = dstBytes + z * dstDepthPitch
++              + (by * 4 + y) * dstRowPitch + VkDeviceSize(bx * 4) * layout.texelBytes;
++
++            std::memcpy(dstTexel, texels + y * 4 * layout.texelBytes, cols * layout.texelBytes);
++          }
++        }
++      }
++    }
++  }
++
++}
+diff --git a/src/dxvk/dxvk_bc_format.h b/src/dxvk/dxvk_bc_format.h
+new file mode 100644
+index 0000000..c524d23
+--- /dev/null
++++ b/src/dxvk/dxvk_bc_format.h
+@@ -0,0 +1,67 @@
++#pragma once
++
++#include "dxvk_include.h"
++
++namespace dxvk::bc {
++
++  /**
++   * \brief Uncompressed format used to emulate a BC format
++   *
++   * Some GPUs (all Mali drivers) do not expose textureCompressionBC. For those
++   * the DXGI format table maps BC1-BC5 to an uncompressed format and the BC
++   * data is decoded on the CPU when it is uploaded, see dxvk_bc_decode.cpp.
++   * BC6H and BC7 are not emulated.
++   *
++   * \param [in] format BC Vulkan format
++   * \returns Replacement format, or VK_FORMAT_UNDEFINED if not emulated
++   */
++  inline VkFormat emulatedFormat(VkFormat format) {
++    switch (format) {
++      case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
++      case VK_FORMAT_BC2_UNORM_BLOCK:
++      case VK_FORMAT_BC3_UNORM_BLOCK:
++        return VK_FORMAT_R8G8B8A8_UNORM;
++
++      case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
++      case VK_FORMAT_BC2_SRGB_BLOCK:
++      case VK_FORMAT_BC3_SRGB_BLOCK:
++        return VK_FORMAT_R8G8B8A8_SRGB;
++
++      case VK_FORMAT_BC4_UNORM_BLOCK: return VK_FORMAT_R8_UNORM;
++      case VK_FORMAT_BC4_SNORM_BLOCK: return VK_FORMAT_R8_SNORM;
++      case VK_FORMAT_BC5_UNORM_BLOCK: return VK_FORMAT_R8G8_UNORM;
++      case VK_FORMAT_BC5_SNORM_BLOCK: return VK_FORMAT_R8G8_SNORM;
++
++      default:
++        return VK_FORMAT_UNDEFINED;
++    }
++  }
++
++
++  /**
++   * \brief Decodes BC1-BC5 data into the emulation format
++   *
++   * Source data is laid out in 4x4 blocks with the given pitches, in bytes.
++   * Output is tightly packed. Partial blocks at the right and bottom edges
++   * are cropped to the requested size.
++   *
++   * \param [in] format BC Vulkan format, see \ref emulatedFormat
++   * \param [in] src Compressed data
++   * \param [in] srcRowPitch Bytes between rows of blocks
++   * \param [in] srcDepthPitch Bytes between depth slices
++   * \param [out] dst Decoded texels
++   * \param [in] width Width in texels
++   * \param [in] height Height in texels
++   * \param [in] depth Depth in texels
++   */
++  void decode(
++          VkFormat      format,
++    const void*         src,
++          VkDeviceSize  srcRowPitch,
++          VkDeviceSize  srcDepthPitch,
++          void*         dst,
++          uint32_t      width,
++          uint32_t      height,
++          uint32_t      depth);
++
++}
+diff --git a/src/dxvk/dxvk_context.cpp b/src/dxvk/dxvk_context.cpp
+index a1c67a9..8f6aa86 100644
+--- a/src/dxvk/dxvk_context.cpp
++++ b/src/dxvk/dxvk_context.cpp
+@@ -2,6 +2,7 @@
+ #include <vector>
+ #include <utility>
+ 
++#include "dxvk_bc_format.h"
+ #include "dxvk_device.h"
+ #include "dxvk_context.h"
+ #include "dxvk_main.h"
+@@ -760,8 +761,13 @@ namespace dxvk {
+       
+     m_execAcquires.recordCommands(m_cmd);
+ 
+-    this->copyImageBufferData<true>(DxvkCmdBuffer::ExecBuffer, dstImage, dstSubresource,
+-      dstOffset, dstExtent, dstImageLayoutTransfer, srcSlice, rowAlignment, sliceAlignment);
++    if (dstImage->info().bcEmulation != VK_FORMAT_UNDEFINED) {
++      this->copyBcBufferData(DxvkCmdBuffer::ExecBuffer, dstImage, dstSubresource,
++        dstOffset, dstExtent, dstImageLayoutTransfer, srcBuffer, srcOffset, rowAlignment, sliceAlignment);
++    } else {
++      this->copyImageBufferData<true>(DxvkCmdBuffer::ExecBuffer, dstImage, dstSubresource,
++        dstOffset, dstExtent, dstImageLayoutTransfer, srcSlice, rowAlignment, sliceAlignment);
++    }
+ 
+     m_execBarriers.accessImage(
+       dstImage, dstSubresourceRange,
+@@ -2348,7 +2354,7 @@ namespace dxvk {
+     DxvkCmdBuffer cmdBuffer = DxvkCmdBuffer::SdmaBuffer;
+     DxvkBarrierSet* barriers = &m_sdmaAcquires;
+     
+-    if (subresources.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) {
++    if ((subresources.aspectMask & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
+       cmdBuffer = DxvkCmdBuffer::InitBuffer;
+       barriers = &m_initBarriers;
+     }
+@@ -3039,6 +3045,12 @@ namespace dxvk {
+     const void*                 hostData,
+           VkDeviceSize          rowPitch,
+           VkDeviceSize          slicePitch) {
++    if (image->info().bcEmulation != VK_FORMAT_UNDEFINED) {
++      this->copyBcHostData(cmd, image, imageSubresource, imageOffset,
++        imageExtent, hostData, rowPitch, slicePitch);
++      return;
++    }
++
+     auto formatInfo = image->formatInfo();
+     auto srcData = reinterpret_cast<const char*>(hostData);
+ 
+@@ -3081,6 +3093,111 @@ namespace dxvk {
+   }
+ 
+ 
++  void DxvkContext::copyBcHostData(
++          DxvkCmdBuffer         cmd,
++    const Rc<DxvkImage>&        image,
++    const VkImageSubresourceLayers& imageSubresource,
++          VkOffset3D            imageOffset,
++          VkExtent3D            imageExtent,
++    const void*                 hostData,
++          VkDeviceSize          rowPitch,
++          VkDeviceSize          slicePitch) {
++    // The image uses a decoded format, but the application provides BC blocks.
++    // Decode each layer into a tightly packed staging slice and upload that.
++    const VkFormat bcFormat = image->info().bcEmulation;
++    const VkDeviceSize decodedSize = image->formatInfo()->elementSize
++      * util::flattenImageExtent(imageExtent);
++
++    auto layerData = reinterpret_cast<const char*>(hostData);
++
++    for (uint32_t i = 0; i < imageSubresource.layerCount; i++) {
++      auto stagingSlice  = m_staging.alloc(CACHE_LINE_SIZE, decodedSize);
++      auto stagingHandle = stagingSlice.getSliceHandle();
++
++      bc::decode(bcFormat, layerData, rowPitch, slicePitch, stagingHandle.mapPtr,
++        imageExtent.width, imageExtent.height, imageExtent.depth);
++
++
++      auto subresource = imageSubresource;
++      subresource.baseArrayLayer += i;
++      subresource.layerCount = 1;
++
++      this->copyImageBufferData<true>(cmd,
++        image, subresource, imageOffset, imageExtent,
++        image->pickLayout(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL),
++        stagingHandle, 0, 0);
++
++      layerData += slicePitch;
++
++      m_cmd->trackResource<DxvkAccess::Read>(stagingSlice.buffer());
++    }
++  }
++
++
++  void DxvkContext::copyBcBufferData(
++          DxvkCmdBuffer         cmd,
++    const Rc<DxvkImage>&        image,
++    const VkImageSubresourceLayers& imageSubresource,
++          VkOffset3D            imageOffset,
++          VkExtent3D            imageExtent,
++          VkImageLayout         imageLayout,
++    const Rc<DxvkBuffer>&       srcBuffer,
++          VkDeviceSize          srcOffset,
++          VkDeviceSize          rowAlignment,
++          VkDeviceSize          sliceAlignment) {
++    // Same as above, but the BC blocks are in a buffer that is laid out the way
++    // copyImageBufferData would read it. We need CPU access to decode them.
++    const VkFormat bcFormat = image->info().bcEmulation;
++    auto bcInfo = imageFormatInfo(bcFormat);
++
++    auto srcData = reinterpret_cast<const char*>(srcBuffer->mapPtr(srcOffset));
++
++    if (!srcData) {
++      Logger::err("DXVK: BC emulation: source buffer is not host visible, skipping copy");
++      return;
++    }
++
++    const VkDeviceSize elementSize = bcInfo->elementSize;
++    const VkExtent3D blockCount = util::computeBlockCount(imageExtent, bcInfo->blockSize);
++
++    VkDeviceSize rowPitch = blockCount.width * elementSize;
++
++    if (rowAlignment > elementSize)
++      rowPitch = rowAlignment >= rowPitch ? rowAlignment : align(rowPitch, rowAlignment);
++
++    VkDeviceSize slicePitch = blockCount.height * rowPitch;
++
++    if (image->info().type == VK_IMAGE_TYPE_3D && sliceAlignment > elementSize)
++      slicePitch = sliceAlignment >= slicePitch ? sliceAlignment : align(slicePitch, sliceAlignment);
++
++    VkDeviceSize layerPitch = blockCount.depth * slicePitch;
++
++    if (sliceAlignment)
++      layerPitch = sliceAlignment >= layerPitch ? sliceAlignment : align(layerPitch, sliceAlignment);
++
++    const VkDeviceSize decodedSize = image->formatInfo()->elementSize
++      * util::flattenImageExtent(imageExtent);
++
++    for (uint32_t i = 0; i < imageSubresource.layerCount; i++) {
++      auto stagingSlice  = m_staging.alloc(CACHE_LINE_SIZE, decodedSize);
++      auto stagingHandle = stagingSlice.getSliceHandle();
++
++      bc::decode(bcFormat, srcData + i * layerPitch, rowPitch, slicePitch, stagingHandle.mapPtr,
++        imageExtent.width, imageExtent.height, imageExtent.depth);
++
++      auto subresource = imageSubresource;
++      subresource.baseArrayLayer += i;
++      subresource.layerCount = 1;
++
++      this->copyImageBufferData<true>(cmd,
++        image, subresource, imageOffset, imageExtent,
++        imageLayout, stagingHandle, 0, 0);
++
++      m_cmd->trackResource<DxvkAccess::Read>(stagingSlice.buffer());
++    }
++  }
++
++
+   void DxvkContext::clearImageViewFb(
+     const Rc<DxvkImageView>&    imageView,
+           VkOffset3D            offset,
+diff --git a/src/dxvk/dxvk_context.h b/src/dxvk/dxvk_context.h
+index 46c9037..f041abd 100644
+--- a/src/dxvk/dxvk_context.h
++++ b/src/dxvk/dxvk_context.h
+@@ -1143,6 +1143,28 @@ namespace dxvk {
+             VkDeviceSize          rowPitch,
+             VkDeviceSize          slicePitch);
+ 
++    void copyBcHostData(
++            DxvkCmdBuffer         cmd,
++      const Rc<DxvkImage>&        image,
++      const VkImageSubresourceLayers& imageSubresource,
++            VkOffset3D            imageOffset,
++            VkExtent3D            imageExtent,
++      const void*                 hostData,
++            VkDeviceSize          rowPitch,
++            VkDeviceSize          slicePitch);
++
++    void copyBcBufferData(
++            DxvkCmdBuffer         cmd,
++      const Rc<DxvkImage>&        image,
++      const VkImageSubresourceLayers& imageSubresource,
++            VkOffset3D            imageOffset,
++            VkExtent3D            imageExtent,
++            VkImageLayout         imageLayout,
++      const Rc<DxvkBuffer>&       srcBuffer,
++            VkDeviceSize          srcOffset,
++            VkDeviceSize          rowAlignment,
++            VkDeviceSize          sliceAlignment);
++
+     void clearImageViewFb(
+       const Rc<DxvkImageView>&    imageView,
+             VkOffset3D            offset,
+diff --git a/src/dxvk/dxvk_image.cpp b/src/dxvk/dxvk_image.cpp
+index f849a72..ee42cd4 100644
+--- a/src/dxvk/dxvk_image.cpp
++++ b/src/dxvk/dxvk_image.cpp
+@@ -215,6 +215,19 @@ namespace dxvk {
+         VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY };
+     }
+     
++    // Applications sometimes ask for mip levels or layers that do not exist. D3D11 rejects
++    // such views, but some drivers (Mali) crash instead of returning an error.
++    if (!subresourceRange.levelCount || !subresourceRange.layerCount
++     || subresourceRange.baseMipLevel   + subresourceRange.levelCount > m_image->info().mipLevels
++     || subresourceRange.baseArrayLayer + subresourceRange.layerCount > m_image->info().numLayers) {
++      throw DxvkError(str::format(
++        "DxvkImageView: Invalid subresource range:",
++        "\n  Mip levels:    ", subresourceRange.baseMipLevel, " + ", subresourceRange.levelCount,
++        " of ", m_image->info().mipLevels,
++        "\n  Array layers:  ", subresourceRange.baseArrayLayer, " + ", subresourceRange.layerCount,
++        " of ", m_image->info().numLayers));
++    }
++
+     if (m_vkd->vkCreateImageView(m_vkd->device(),
+           &viewInfo, nullptr, &m_views[type]) != VK_SUCCESS) {
+       throw DxvkError(str::format(
+diff --git a/src/dxvk/dxvk_image.h b/src/dxvk/dxvk_image.h
+index b3b721e..ca21baa 100644
+--- a/src/dxvk/dxvk_image.h
++++ b/src/dxvk/dxvk_image.h
+@@ -65,6 +65,10 @@ namespace dxvk {
+     // be used with this image
+     uint32_t        viewFormatCount = 0;
+     const VkFormat* viewFormats     = nullptr;
++
++    // BC format that uploads to this image are encoded in, if the
++    // device cannot do BC and the image uses a decoded format instead
++    VkFormat        bcEmulation     = VK_FORMAT_UNDEFINED;
+   };
+   
+   
+diff --git a/src/dxvk/meson.build b/src/dxvk/meson.build
+index 7135911..de0cb48 100644
+--- a/src/dxvk/meson.build
++++ b/src/dxvk/meson.build
+@@ -61,6 +61,7 @@ dxvk_shaders = files([
+ dxvk_src = [
+   'dxvk_adapter.cpp',
+   'dxvk_barrier.cpp',
++  'dxvk_bc_decode.cpp',
+   'dxvk_buffer.cpp',
+   'dxvk_cmdlist.cpp',
+   'dxvk_compute.cpp',
+@@ -122,10 +123,16 @@ dxvk_src_sdl2 = [
+   'platform/dxvk_sdl2_exts.cpp'
+ ]
+ 
++dxvk_src_sdl3 = [
++  'platform/dxvk_sdl3_exts.cpp'
++]
++
+ if dxvk_wsi == 'win32'
+   dxvk_src += dxvk_src_win32
+ elif dxvk_wsi == 'sdl2'
+   dxvk_src += dxvk_src_sdl2
++elif dxvk_wsi == 'sdl3'
++  dxvk_src += dxvk_src_sdl3
+ else
+   error('Unknown platform for dxvk')
+ endif
+diff --git a/src/dxvk/platform/dxvk_sdl3_exts.cpp b/src/dxvk/platform/dxvk_sdl3_exts.cpp
+new file mode 100644
+index 0000000..65357dd
+--- /dev/null
++++ b/src/dxvk/platform/dxvk_sdl3_exts.cpp
+@@ -0,0 +1,48 @@
++#include "../dxvk_platform_exts.h"
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_vulkan.h>
++
++namespace dxvk {
++
++  DxvkPlatformExts DxvkPlatformExts::s_instance;
++
++  std::string_view DxvkPlatformExts::getName() {
++    return "SDL3 WSI";
++  }
++
++
++  DxvkNameSet DxvkPlatformExts::getInstanceExtensions() {
++    // SDL3 reports the required instance extensions from the active video
++    // driver, so no dummy window is needed. Video must already be initialized.
++    Uint32 extensionCount = 0;
++    const char* const* extensionNames = SDL_Vulkan_GetInstanceExtensions(&extensionCount);
++
++    if (extensionNames == nullptr)
++      throw DxvkError(str::format("SDL3 WSI: Failed to get instance extensions. ", SDL_GetError()));
++
++    DxvkNameSet names;
++    for (Uint32 i = 0; i < extensionCount; i++)
++      names.add(extensionNames[i]);
++
++    return names;
++  }
++
++
++  DxvkNameSet DxvkPlatformExts::getDeviceExtensions(
++          uint32_t      adapterId) {
++    return DxvkNameSet();
++  }
++
++
++  void DxvkPlatformExts::initInstanceExtensions() {
++
++  }
++
++
++  void DxvkPlatformExts::initDeviceExtensions(
++    const DxvkInstance* instance) {
++
++  }
++
++}
+diff --git a/src/util/sync/sync_spinlock.h b/src/util/sync/sync_spinlock.h
+index 2715792..089f2dd 100644
+--- a/src/util/sync/sync_spinlock.h
++++ b/src/util/sync/sync_spinlock.h
+@@ -21,7 +21,11 @@ namespace dxvk::sync {
+   void spin(uint32_t spinCount, const Fn& fn) {
+     while (unlikely(!fn())) {
+       for (uint32_t i = 1; i < spinCount; i++) {
++        #if defined(DXVK_ARCH_X86)
+         _mm_pause();
++        #elif defined(__aarch64__) || defined(__arm__)
++        __asm__ __volatile__("yield");
++        #endif
+         if (fn())
+           return;
+       }
+diff --git a/src/util/util_bit.h b/src/util/util_bit.h
+index 3c65c70..8311148 100644
+--- a/src/util/util_bit.h
++++ b/src/util/util_bit.h
+@@ -1,6 +1,11 @@
+ #pragma once
+ 
++#if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
++#define DXVK_ARCH_X86 1
++#endif
++
+ #ifndef _MSC_VER
++#ifdef DXVK_ARCH_X86
+ #if defined(__WINE__) && defined(__clang__)
+ #pragma push_macro("_WIN32")
+ #undef _WIN32
+@@ -9,6 +14,7 @@
+ #if defined(__WINE__) && defined(__clang__)
+ #pragma pop_macro("_WIN32")
+ #endif
++#endif
+ #else
+ #include <intrin.h>
+ #endif
+@@ -55,6 +61,8 @@ namespace dxvk::bit {
+     return _tzcnt_u32(n);
+     #elif defined(__BMI__)
+     return __tzcnt_u32(n);
++    #elif (defined(__GNUC__) || defined(__clang__)) && !defined(DXVK_ARCH_X86)
++    return n != 0 ? __builtin_ctz(n) : 32;
+     #elif defined(__GNUC__) || defined(__clang__)
+     uint32_t res;
+     uint32_t tmp;
+@@ -144,7 +152,7 @@ namespace dxvk::bit {
+   template<typename T>
+   bool bcmpeq(const T* a, const T* b) {
+     static_assert(alignof(T) >= 16);
+-    #if defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)
++    #if (defined(__GNUC__) || defined(__clang__) || defined(_MSC_VER)) && defined(DXVK_ARCH_X86)
+     auto ai = reinterpret_cast<const __m128i*>(a);
+     auto bi = reinterpret_cast<const __m128i*>(b);
+ 
+diff --git a/src/util/util_vector.h b/src/util/util_vector.h
+index 77cdf29..e07bdbf 100644
+--- a/src/util/util_vector.h
++++ b/src/util/util_vector.h
+@@ -151,10 +151,16 @@ namespace dxvk {
+ 
+   inline Vector4 replaceNaN(Vector4 a) {
+     Vector4 result;
++    #if defined(__x86_64__) || defined(__i386__) || defined(_M_X64) || defined(_M_IX86)
+     __m128 value = _mm_load_ps(a.data);
+     __m128 mask  = _mm_cmpeq_ps(value, value);
+            value = _mm_and_ps(value, mask);
+     _mm_store_ps(result.data, value);
++    #else
++    // NaN != NaN, so this zeroes every NaN component like the SSE path.
++    for (size_t i = 0; i < 4; i++)
++      result.data[i] = (a.data[i] == a.data[i]) ? a.data[i] : 0.0f;
++    #endif
+     return result;
+   }
+ 
+diff --git a/src/wsi/meson.build b/src/wsi/meson.build
+index 6ab147b..fc7053b 100644
+--- a/src/wsi/meson.build
++++ b/src/wsi/meson.build
+@@ -12,12 +12,22 @@ wsi_sdl2_src = [
+   'sdl2/wsi_window_sdl2.cpp',
+ ]
+ 
++wsi_sdl3_src = [
++  'sdl3/wsi_mode_sdl3.cpp',
++  'sdl3/wsi_monitor_sdl3.cpp',
++  'sdl3/wsi_presenter_sdl3.cpp',
++  'sdl3/wsi_window_sdl3.cpp',
++]
++
+ if dxvk_wsi == 'win32'
+   wsi_src  = wsi_win32_src
+   wsi_deps = []
+ elif dxvk_wsi == 'sdl2'
+   wsi_src  = wsi_sdl2_src
+   wsi_deps = [ lib_sdl2 ]
++elif dxvk_wsi == 'sdl3'
++  wsi_src  = wsi_sdl3_src
++  wsi_deps = [ lib_sdl3 ]
+ else
+   error('Unknown wsi')
+ endif
+diff --git a/src/wsi/sdl3/wsi_helpers_sdl3.h b/src/wsi/sdl3/wsi_helpers_sdl3.h
+new file mode 100644
+index 0000000..33a4e37
+--- /dev/null
++++ b/src/wsi/sdl3/wsi_helpers_sdl3.h
+@@ -0,0 +1,47 @@
++#pragma once
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_vulkan.h>
++
++#include "../wsi_monitor.h"
++
++namespace dxvk {
++
++  // SDL3 identifies displays by SDL_DisplayID rather than by index.
++  // The HMONITOR encoding used by DXVK stays index based, so translate here.
++  inline SDL_DisplayID getDisplayId(int32_t displayIndex) {
++    if (displayIndex < 0)
++      return 0;
++
++    int count = 0;
++    SDL_DisplayID* displays = SDL_GetDisplays(&count);
++
++    SDL_DisplayID id = 0;
++    if (displays != nullptr && displayIndex < count)
++      id = displays[displayIndex];
++
++    SDL_free(displays);
++    return id;
++  }
++
++  inline bool isDisplayValid(int32_t displayIndex) {
++    return getDisplayId(displayIndex) != 0;
++  }
++
++  inline int32_t getDisplayIndex(SDL_DisplayID displayId) {
++    int count = 0;
++    SDL_DisplayID* displays = SDL_GetDisplays(&count);
++
++    int32_t index = -1;
++    for (int i = 0; displays != nullptr && i < count; i++) {
++      if (displays[i] == displayId) {
++        index = i;
++        break;
++      }
++    }
++
++    SDL_free(displays);
++    return index;
++  }
++
++}
+diff --git a/src/wsi/sdl3/wsi_mode_sdl3.cpp b/src/wsi/sdl3/wsi_mode_sdl3.cpp
+new file mode 100644
+index 0000000..9ae02a0
+--- /dev/null
++++ b/src/wsi/sdl3/wsi_mode_sdl3.cpp
+@@ -0,0 +1,99 @@
++#include "../wsi_mode.h"
++
++#include "wsi_helpers_sdl3.h"
++
++#include <wsi/native_wsi.h>
++
++#include "../../util/util_string.h"
++#include "../../util/log/log.h"
++
++namespace dxvk::wsi {
++
++  static inline uint32_t roundToNextPow2(uint32_t num) {
++    if (num-- == 0)
++      return 0;
++
++    num |= num >> 1; num |= num >> 2;
++    num |= num >> 4; num |= num >> 8;
++    num |= num >> 16;
++
++    return ++num;
++  }
++
++
++  static inline void convertMode(const SDL_DisplayMode& mode, WsiMode* pMode) {
++    const SDL_PixelFormatDetails* details = SDL_GetPixelFormatDetails(mode.format);
++
++    pMode->width          = uint32_t(mode.w);
++    pMode->height         = uint32_t(mode.h);
++    pMode->refreshRate    = WsiRational{ uint32_t(mode.refresh_rate * 1000.0f), 1000 };
++    // BPP should always be a power of two
++    // to match Windows behaviour of including padding.
++    pMode->bitsPerPixel   = roundToNextPow2(details ? details->bits_per_pixel : 32);
++    pMode->interlaced     = false;
++  }
++
++
++  bool getDisplayMode(
++          HMONITOR         hMonitor,
++          uint32_t         ModeNumber,
++          WsiMode*         pMode) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++
++    if (displayId == 0)
++      return false;
++
++    int count = 0;
++    SDL_DisplayMode** modes = SDL_GetFullscreenDisplayModes(displayId, &count);
++
++    bool found = false;
++    if (modes != nullptr && ModeNumber < uint32_t(count)) {
++      convertMode(*modes[ModeNumber], pMode);
++      found = true;
++    }
++
++    SDL_free(modes);
++    return found;
++  }
++
++
++  bool getCurrentDisplayMode(
++          HMONITOR         hMonitor,
++          WsiMode*         pMode) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++
++    if (displayId == 0)
++      return false;
++
++    const SDL_DisplayMode* mode = SDL_GetCurrentDisplayMode(displayId);
++    if (mode == nullptr) {
++      Logger::err(str::format("SDL_GetCurrentDisplayMode: ", SDL_GetError()));
++      return false;
++    }
++
++    convertMode(*mode, pMode);
++
++    return true;
++  }
++
++
++  bool getDesktopDisplayMode(
++          HMONITOR         hMonitor,
++          WsiMode*         pMode) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++
++    if (displayId == 0)
++      return false;
++
++    const SDL_DisplayMode* mode = SDL_GetDesktopDisplayMode(displayId);
++    if (mode == nullptr) {
++      Logger::err(str::format("SDL_GetDesktopDisplayMode: ", SDL_GetError()));
++      return false;
++    }
++
++    convertMode(*mode, pMode);
++
++    return true;
++  }
++
++}
+diff --git a/src/wsi/sdl3/wsi_monitor_sdl3.cpp b/src/wsi/sdl3/wsi_monitor_sdl3.cpp
+new file mode 100644
+index 0000000..8be0292
+--- /dev/null
++++ b/src/wsi/sdl3/wsi_monitor_sdl3.cpp
+@@ -0,0 +1,64 @@
++#include "../wsi_monitor.h"
++
++#include "wsi_helpers_sdl3.h"
++
++#include <windows.h>
++#include <wsi/native_wsi.h>
++
++#include <string>
++#include <sstream>
++
++namespace dxvk::wsi {
++
++  HMONITOR getDefaultMonitor() {
++    return enumMonitors(0);
++  }
++
++
++  HMONITOR enumMonitors(uint32_t index) {
++    return isDisplayValid(int32_t(index))
++      ? toHmonitor(index)
++      : nullptr;
++  }
++
++  bool getDisplayName(
++          HMONITOR         hMonitor,
++          WCHAR            (&Name)[32]) {
++    const int32_t displayIndex = fromHmonitor(hMonitor);
++
++    if (!isDisplayValid(displayIndex))
++      return false;
++
++    std::wstringstream nameStream;
++    nameStream << LR"(\\.\DISPLAY)" << (displayIndex + 1);
++
++    std::wstring name = nameStream.str();
++
++    std::memset(Name, 0, sizeof(Name));
++    name.copy(Name, name.length(), 0);
++
++    return true;
++  }
++
++
++  bool getDesktopCoordinates(
++          HMONITOR         hMonitor,
++          RECT*            pRect) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++
++    if (displayId == 0)
++      return false;
++
++    SDL_Rect rect = { };
++    if (!SDL_GetDisplayBounds(displayId, &rect))
++      return false;
++
++    pRect->left   = rect.x;
++    pRect->top    = rect.y;
++    pRect->right  = rect.x + rect.w;
++    pRect->bottom = rect.y + rect.h;
++
++    return true;
++  }
++
++}
+diff --git a/src/wsi/sdl3/wsi_presenter_sdl3.cpp b/src/wsi/sdl3/wsi_presenter_sdl3.cpp
+new file mode 100644
+index 0000000..7a74522
+--- /dev/null
++++ b/src/wsi/sdl3/wsi_presenter_sdl3.cpp
+@@ -0,0 +1,21 @@
++#include "../wsi_presenter.h"
++
++#include <SDL3/SDL.h>
++#include <SDL3/SDL_vulkan.h>
++
++#include <wsi/native_wsi.h>
++
++namespace dxvk::wsi {
++
++  VkResult createSurface(
++          HWND                hWindow,
++    const Rc<vk::InstanceFn>& vki,
++          VkSurfaceKHR*       pSurface) {
++    SDL_Window* window = fromHwnd(hWindow);
++
++    return SDL_Vulkan_CreateSurface(window, vki->instance(), nullptr, pSurface)
++         ? VK_SUCCESS
++         : VK_ERROR_OUT_OF_HOST_MEMORY;
++  }
++
++}
+diff --git a/src/wsi/sdl3/wsi_window_sdl3.cpp b/src/wsi/sdl3/wsi_window_sdl3.cpp
+new file mode 100644
+index 0000000..bc59386
+--- /dev/null
++++ b/src/wsi/sdl3/wsi_window_sdl3.cpp
+@@ -0,0 +1,128 @@
++#include "../wsi_window.h"
++
++#include "wsi_helpers_sdl3.h"
++
++#include <windows.h>
++#include <wsi/native_wsi.h>
++
++#include "../../util/util_string.h"
++#include "../../util/log/log.h"
++
++namespace dxvk::wsi {
++
++  void getWindowSize(
++        HWND      hWindow,
++        uint32_t* pWidth,
++        uint32_t* pHeight) {
++    SDL_Window* window = fromHwnd(hWindow);
++
++    int32_t w = 0, h = 0;
++    SDL_GetWindowSizeInPixels(window, &w, &h);
++
++    if (pWidth)
++      *pWidth = uint32_t(w);
++
++    if (pHeight)
++      *pHeight = uint32_t(h);
++  }
++
++
++  void resizeWindow(
++          HWND             hWindow,
++          DxvkWindowState* pState,
++          uint32_t         Width,
++          uint32_t         Height) {
++    SDL_Window* window = fromHwnd(hWindow);
++
++    SDL_SetWindowSize(window, int32_t(Width), int32_t(Height));
++  }
++
++
++  bool setWindowMode(
++          HMONITOR         hMonitor,
++          HWND             hWindow,
++    const WsiMode*         pMode,
++          bool             EnteringFullscreen) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++    SDL_Window* window            = fromHwnd(hWindow);
++
++    if (displayId == 0)
++      return false;
++
++    float refreshRate = pMode->refreshRate.numerator != 0
++      ? float(pMode->refreshRate.numerator) / float(pMode->refreshRate.denominator)
++      : 0.0f;
++
++    SDL_DisplayMode mode = { };
++    if (!SDL_GetClosestFullscreenDisplayMode(displayId, int(pMode->width), int(pMode->height), refreshRate, false, &mode)) {
++      Logger::err(str::format("SDL3 WSI: setWindowMode: SDL_GetClosestFullscreenDisplayMode: ", SDL_GetError()));
++      return false;
++    }
++
++    if (!SDL_SetWindowFullscreenMode(window, &mode)) {
++      Logger::err(str::format("SDL3 WSI: setWindowMode: SDL_SetWindowFullscreenMode: ", SDL_GetError()));
++      return false;
++    }
++
++    return true;
++  }
++
++
++  bool enterFullscreenMode(
++          HMONITOR         hMonitor,
++          HWND             hWindow,
++          DxvkWindowState* pState,
++          bool             ModeSwitch) {
++    const SDL_DisplayID displayId = getDisplayId(fromHmonitor(hMonitor));
++    SDL_Window* window            = fromHwnd(hWindow);
++
++    if (displayId == 0)
++      return false;
++
++    // A null mode selects borderless fullscreen at desktop resolution,
++    // the equivalent of SDL2's SDL_WINDOW_FULLSCREEN_DESKTOP.
++    if (!ModeSwitch)
++      SDL_SetWindowFullscreenMode(window, nullptr);
++
++    if (!SDL_SetWindowFullscreen(window, true)) {
++      Logger::err(str::format("SDL3 WSI: enterFullscreenMode: SDL_SetWindowFullscreen: ", SDL_GetError()));
++      return false;
++    }
++
++    return true;
++  }
++
++
++  bool leaveFullscreenMode(
++          HWND             hWindow,
++          DxvkWindowState* pState) {
++    SDL_Window* window = fromHwnd(hWindow);
++
++    if (!SDL_SetWindowFullscreen(window, false)) {
++      Logger::err(str::format("SDL3 WSI: leaveFullscreenMode: SDL_SetWindowFullscreen: ", SDL_GetError()));
++      return false;
++    }
++
++    return true;
++  }
++
++
++  bool restoreDisplayMode(HMONITOR hMonitor) {
++    return isDisplayValid(fromHmonitor(hMonitor));
++  }
++
++
++  HMONITOR getWindowMonitor(HWND hWindow) {
++    SDL_Window* window     = fromHwnd(hWindow);
++    const SDL_DisplayID id = SDL_GetDisplayForWindow(window);
++
++    return toHmonitor(getDisplayIndex(id));
++  }
++
++
++  bool isWindow(HWND hWindow) {
++    SDL_Window* window = fromHwnd(hWindow);
++    return window != nullptr;
++  }
++
++}

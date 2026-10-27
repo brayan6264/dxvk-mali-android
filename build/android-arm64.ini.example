@@ -1,0 +1,21 @@
+# Cross file for Android arm64 with the NDK clang. Copy it to android-arm64.ini and replace
+# NDK_BIN with <ndk>/toolchains/llvm/prebuilt/<host>/bin (forward slashes, also on Windows),
+# and SDL3_INCLUDE with the folder that holds the SDL3/ headers.
+# On Windows the compiler names end in .exe; on Linux/macOS drop the .exe.
+
+[binaries]
+c = ['NDK_BIN/clang.exe', '--target=aarch64-linux-android26']
+cpp = ['NDK_BIN/clang++.exe', '--target=aarch64-linux-android26']
+ar = 'NDK_BIN/llvm-ar.exe'
+strip = 'NDK_BIN/llvm-strip.exe'
+ranlib = 'NDK_BIN/llvm-ranlib.exe'
+
+[host_machine]
+system = 'android'
+cpu_family = 'aarch64'
+cpu = 'armv8-a'
+endian = 'little'
+
+[built-in options]
+c_args = ['-ISDL3_INCLUDE']
+cpp_args = ['-ISDL3_INCLUDE']
